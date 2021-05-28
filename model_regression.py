@@ -34,7 +34,7 @@ def train(model, count, optimizer):
         Tw0 = model(w0)
 
         # loss
-        valid_subset_x, valid_subset_y = dataset.getBaseSubset(class_idx, posi_num, 100)
+        valid_subset_x, valid_subset_y = dataset.getBaseSubset(class_idx, posi_num, 100)  # 100: hyper
         loss1 = 0.5 * torch.sum((Tw0 - wstar) * (Tw0 - wstar))
         
         predict = torch.matmul(valid_subset_x.cuda(), Tw0[0, :4096]) + Tw0[0, 4096]
@@ -96,7 +96,7 @@ def train(model, count, optimizer):
 def refine(model, count, novel_class_id):
     model.train()
     # init
-    subset_x, subset_y = dataset.getNovelSubset(novel_class_id, random.randint(3,10), 5)
+    subset_x, subset_y = dataset.getNovelSubset(novel_class_id, random.randint(3,10), 5)  # hyper
     init_model = SVC(kernel = 'linear', random_state = 0, tol=random.sample([0.01,0.1,1,10,100], 1)[0])
     init_model.fit(subset_x, subset_y)
     w = torch.tensor(init_model.coef_.copy(), dtype=torch.float32)
@@ -136,17 +136,19 @@ def refine(model, count, novel_class_id):
         loss.backward()
         optimizer.step()
 
+    return model.W
+
 
     # test
-    predict = torch.matmul(dataset.test_set["features"].cuda(), model.W[0, :4096]) + model.W[0, 4096]
-    for i in range(len(predict)):
-        if predict[i] > 0:
-            print("result! {}, {:.4f}".format(dataset.test_set["names"][i], predict[i]))
+    # predict = torch.matmul(dataset.test_set["features"].cuda(), model.W[0, :4096]) + model.W[0, 4096]
+    # for i in range(len(predict)):
+    #     if predict[i] > 0:
+    #         print("result! {}, {:.4f}".format(dataset.test_set["names"][i], predict[i]))
 
-    predict = torch.matmul(dataset.test_set["features"].cuda(), w0[0, :4096]) + w0[0, 4096]
-    for i in range(len(predict)):
-        if predict[i] > 0:
-            print("origin result! {}, {:.4f}".format(dataset.test_set["names"][i], predict[i]))
+    # predict = torch.matmul(dataset.test_set["features"].cuda(), w0[0, :4096]) + w0[0, 4096]
+    # for i in range(len(predict)):
+    #     if predict[i] > 0:
+    #         print("origin result! {}, {:.4f}".format(dataset.test_set["names"][i], predict[i]))
 
 
 
@@ -166,6 +168,27 @@ if __name__ == '__main__':
 
     model = RegressionModel().cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    train(model, 100, optimizer)
-    refine(model, 70, 1)
-    
+    train(model, 100, optimizer) # 100 HYPER
+    iter_ls = [
+        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
+        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
+        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
+        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
+        70, 70, 70, 70, 70, 70, 70, 70, 70, 70
+    ] # IMPORTANT HYPER
+    W_ls = []
+    for i in range(50):
+        W = refine(model, iter_ls[i], i+1)
+        W_ls.append(W)
+
+    Ws = torch.squeeze(torch.stack(W_ls, -1)) # [4097, 50]
+    predict = torch.matmul(dataset.test_set["features"].cuda(), Ws[:4096, :]) # [2500, 50]
+    predict += Ws[4096, :] # [2500, 50]
+    sorted_predict = torch.sort(predict, -1)
+    for i in range(predict.shape[0]):
+        print(sorted_predict[0][i][-1], sorted_predict[1][i][-1]+1, dataset.test_set["names"][i])
+    with open("proj2_prediction_8.txt", 'w') as f:
+        for i in range(predict.shape[0]):
+            f.write(str((sorted_predict[1][i][-1]+1).cpu().detach().numpy().item()))
+            f.write("\n")
+    np.save("final_model.npy", Ws.cpu().detach().numpy())
