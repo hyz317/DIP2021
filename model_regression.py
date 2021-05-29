@@ -168,13 +168,13 @@ if __name__ == '__main__':
 
     model = RegressionModel().cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    train(model, 100, optimizer) # 100 HYPER
+    train(model, 150, optimizer) # 100 HYPER
     iter_ls = [
-        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
-        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
-        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
-        70, 70, 70, 70, 70, 70, 70, 70, 70, 70,
-        70, 70, 70, 70, 70, 70, 70, 70, 70, 70
+        60, 70, 70, 65, 75, 60, 80, 75, 75, 70,
+        70, 70, 75, 70, 60, 70, 60, 80, 75, 70,
+        75, 70, 80, 70, 70, 70, 60, 70, 70, 70,
+        75, 80, 70, 70, 75, 70, 70, 70, 70, 70,
+        70, 70, 70, 70, 75, 70, 70, 70, 70, 90
     ] # IMPORTANT HYPER
     W_ls = []
     for i in range(50):
@@ -185,10 +185,24 @@ if __name__ == '__main__':
     predict = torch.matmul(dataset.test_set["features"].cuda(), Ws[:4096, :]) # [2500, 50]
     predict += Ws[4096, :] # [2500, 50]
     sorted_predict = torch.sort(predict, -1)
+    class_cnt = [0] * 50
     for i in range(predict.shape[0]):
         print(sorted_predict[0][i][-1], sorted_predict[1][i][-1]+1, dataset.test_set["names"][i])
+        class_cnt[sorted_predict[1][i][-1]] += 1
+    for i in range(len(class_cnt)):
+        print("#", i+1, ":", class_cnt[i])
+    ok = 0
     with open("proj2_prediction_8.txt", 'w') as f:
-        for i in range(predict.shape[0]):
-            f.write(str((sorted_predict[1][i][-1]+1).cpu().detach().numpy().item()))
-            f.write("\n")
+        with open("./data/test_labels.txt", "r") as l:
+            for i in range(predict.shape[0]):
+                result = str((sorted_predict[1][i][-1]+1).cpu().detach().numpy().item())
+                if i < 500:
+                    label = l.readline().strip()
+                    if label == result:
+                        ok += 1
+                    else:
+                        print("#", i+1, "differ, result:", result, "label:", label)
+                f.write(result)
+                f.write("\n")
+    print("test accuracy:", ok, "/ 500 =", ok / 500)
     np.save("final_model.npy", Ws.cpu().detach().numpy())
