@@ -14,18 +14,19 @@ class DataSet:
     # self.base_info:    dict, "labels" -> [100000], "features" -> [100000 4096]
     # self.baselabelid2name: dict
 
-
     def __init__(
         self,
         training_img_dir=None,
-        base_info_dir=None
+        test_img_dir=None,
+        base_info_dir=None,
     ):
         self.alexnet = torchvision.models.alexnet(pretrained=True).cuda()
         if training_img_dir:
             self.loadTrainingSet(training_img_dir)
         if base_info_dir:
             self.loadBaseInfo(base_info_dir)
-
+        if test_img_dir:
+            self.loadTestSet(test_img_dir)
     
     def img2features(self, imgs):
         transform = torchvision.transforms.Compose([
@@ -45,6 +46,22 @@ class DataSet:
         x = self.alexnet.classifier[:6](x)
         return x
 
+    def img2rawfeatures(self, imgs):
+        transform = torchvision.transforms.Compose([
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
+        x = torch.tensor(imgs.transpose([0, 3, 1, 2]) / 255., dtype=torch.float32)
+        ls = []
+        for i in x:
+            ls.append(transform(i))
+        x = torch.stack(ls, 0).cuda()
+        x = self.alexnet.features(x)
+        x = self.alexnet.avgpool(x)
+        x = torch.flatten(x, 1)
+        return x
 
     def loadTrainingSet(self, path):
         self.training_set = {
@@ -59,9 +76,35 @@ class DataSet:
                 self.training_set["labels"].append(label)
                 imgs.append(img)
 
+        self.training_set["imgs"] = np.stack(imgs, 0)
         self.training_set["labels"] = np.stack(self.training_set["labels"], 0)
-        self.training_set["features"] = self.img2features(np.stack(imgs, 0))
+        self.training_set["features"] = self.img2features(np.stack(imgs, 0)).cpu().detach().numpy()
+        self.training_set["raw_features"] = self.img2rawfeatures(np.stack(imgs, 0)).cpu().detach().numpy()
 
+    def loadTestSet(self, path):
+        self.test_set = {
+            "labels": [],
+            "features": []
+        }
+        imgs = []
+        for filename in os.listdir(os.path.join(path)):
+            if filename == 'labels.txt': continue
+            img = cv2.imread(os.path.join(path, filename))
+            imgs.append(img)
+            
+        with open(os.path.join(path, "labels.txt")) as f:
+            self.test_set["labels"] = f.read().split("\n")
+        
+        for i in range(len(self.test_set["labels"])):
+            self.test_set["labels"][i] = int(self.test_set["labels"][i])
+
+        self.test_set["imgs"] = np.stack(imgs, 0)
+        self.test_set["labels"] = np.stack(self.test_set["labels"], 0)
+        self.test_set["features"] = self.img2features(np.stack(imgs, 0)).cpu().detach().numpy()
+        self.test_set["raw_features"] = self.img2rawfeatures(np.stack(imgs, 0)).cpu().detach().numpy()
+        # with open("data/base/names.txt", 'r') as f:
+        #     self.test_set["names"] = f.read().split(" ")
+        # self.test_set["features"] = torch.tensor(np.load("data/base/test_feature.npy"))
 
     def loadBaseInfo(self, path):
         features = np.load(os.path.join(path, "base_feature.npy"))
