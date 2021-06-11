@@ -1,4 +1,7 @@
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
 import numpy as np
 import sys
 import os
@@ -45,6 +48,16 @@ class BaseDataset(torch.utils.data.Dataset):
         )
         return train, val
 
+
+class MLP(nn.Module):
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.linear = nn.Linear(input_size, output_size, bias=True)
+        self.relu = nn.ReLU()
+
+    def forward(self, input):
+        return self.relu(self.linear(input))
+
 def main():
     def preposees_function(example_list, label_list):
         assert len(example_list) == len(label_list)
@@ -71,6 +84,10 @@ def main():
     def gen_novel_label():
         a = np.array(range(500)) / 10
         return [int(i) for i in a] 
+    def compute_metric(logits, labels):
+        preds = torch.argmax(logits, dim=1)
+        return (preds==labels).numpy().astype(np.float32).mean()
+
     '''
     base_features_file = os.path.join('..', '..', 'data', 'base', 'base_feature.npy')
     base_labels_file = os.path.join('..', '..', 'data', 'base', 'base_label.txt')
@@ -86,9 +103,43 @@ def main():
     # base_dataset = BaseDataset(base_feature_label_dict)
     novel_dataset = BaseDataset(novel_feature_label_dict)
     novel_train, novel_val = novel_dataset.devide()
-    print(len(novel_train))
-    print(len(novel_val))
-    # 
+    train_loader = DataLoader(
+        dataset=novel_train,
+        batch_size=4,
+        shuffle=False, # already shuffled
+    )
+    eval_loader = DataLoader(
+        dataset=novel_val,
+        batch_size=4,
+        shuffle=False, # already shuffled
+    )
+    print((novel_train[0]))
+
+    model = MLP(4096, 50)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5, weight_decay=0.2)
+    loss = nn.CrossEntropyLoss()
+    eval_epoch = 10
+    for epoch in range(200):
+        total_loss = 0
+        model.train()
+        for batch in train_loader:
+            output = model(batch['feature'])
+            l = loss(output, batch['labels'])
+            total_loss += l
+            l.backward()
+            optimizer.step()
+        print(f'[epoch {epoch}] training loss = {total_loss / len(train_loader)}')
+        if epoch % eval_epoch == eval_epoch - 1:
+            eval_loss = 0
+            eval_acc = 0
+            model.eval()
+            for batch in eval_loader:
+                output = model(batch['feature'])
+                l = loss(output, batch['labels'])
+                eval_loss += l
+                eval_acc += compute_metric(output, batch['labels'])
+            print(f'[epoch {epoch}] eval loss = {eval_loss / len(eval_loader)}')
+            print(f'[epoch {epoch}] eval acc = {eval_acc / len(eval_loader)}')
 
 
 if __name__ == '__main__':
