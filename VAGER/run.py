@@ -20,8 +20,8 @@ def L(V, T, W, A):
 class VAGER(nn.Module):
     def __init__(self):
         super().__init__()
-        self.V = nn.Linear(1000, 2000, bias=False)
-        self.T = nn.Linear(2000, 4096, bias=False)
+        self.V = nn.Linear(1000, 4000, bias=False)
+        self.T = nn.Linear(4000, 4096, bias=False)
     
     def forward(self, A, W):
         return torch.norm((torch.matmul(self.V.weight.T, self.T.weight.T) - W), p='fro') ** 2 + torch.norm((A - torch.matmul(self.V.weight.T, self.V.weight)), p='fro') ** 2 
@@ -66,11 +66,11 @@ def main():
     if init:
         model = VAGER().to(device)
     else:
-        model = torch.load('bak.bin')
+        model = torch.load('vager600.bin')
         print(type(model))
     # loss = L(V, T, W, A)
     
-    optim = torch.optim.SGD(model.parameters(), lr=0.001)
+    optim = torch.optim.Adam(model.parameters(), lr=0.001)
     loss = nn.L1Loss()
     least = 10000
     for i in range(0, 10000):
