@@ -222,8 +222,10 @@ def predict(novel_feature):
     tr_set, val_set = whole_dataset.devide(shuffle=True, novel=True)
     
     w_analogy = torch.load('w_new.pt')
+    w_analogy = w_analogy / torch.norm(w_analogy, p='fro')
     mlp_W = torch.load('mlp_bak.bin').linear.weight
     print(mlp_W.shape)
+    mlp_W = mlp_W / torch.norm(mlp_W, p='fro')
     novel_feature_list = []
     for i in range(50):
         novel_feature_list += novel_feature[i * 10 + 8: i * 10 + 10]
@@ -238,7 +240,7 @@ def predict(novel_feature):
     )
     acc = 0
     for d in tqdm(dataloader):
-        pred = torch.argmax(torch.matmul(d['feature'].squeeze(), mlp_W.T))
+        pred = torch.argmax(torch.matmul(d['feature'].squeeze(), mlp_W.T + w_analogy.T))
         # print(torch.matmul(d['feature'], w_analogy.T))
         # print(d['feature'].squeeze().shape)
         # print(torch.matmul(d['feature'].squeeze(), w_analogy.T))
