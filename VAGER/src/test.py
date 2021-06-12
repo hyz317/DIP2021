@@ -1,13 +1,11 @@
 import torch
 import random
 
-a = list(range(0, 100))
-b = list(range(0, 100))
-randnum = random.randint(0, 100)
-random.seed(randnum)
-random.shuffle(a)
-random.seed(randnum)
-random.shuffle(b)
+c = torch.zeros((10, 4096))
+a = torch.zeros((1000, 4096))
+b = torch.mean(a, dim=0)
+c[0] = b
 
 print(a)
 print(b)
+print(c)
