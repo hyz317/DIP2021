@@ -1,161 +1,190 @@
 import sys
 sys.path.append("..")
 
-from datetime import datetime
 import numpy as np
+import config
 
 import torch
-from torch.optim import Adam
-from torch.optim.lr_scheduler import StepLR
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchsummary import summary
+from torch.optim import Adam
+from data import CaltechDataset
+from model import Finetuning, ProtoNet
+from dataset_baseline.dataset import DataSet
 
-import config
-from model import Finetuning, BasicProtoNet, AlexProtoNet
-from dataset.dataset import DataSet
-from data import CaltechDataset, FewShotBatchSampler
+num_epoch = 100
+lr = 1e-4
 
-epochs = 1000
-n_train = 5
-k_train = 10
-q_train = 5
-n_test = 1
-k_test = 5
-q_test = 1
-episodes_per_epoch = 100
-num_tasks = 1
-lr = 1e-3
-lr_step_size = 20
-lr_gamma = 0.5
-model_dict = {'Finetuning' : Finetuning(), 'BasicProtoNet' : BasicProtoNet(), 'AlexProtoNet' : AlexProtoNet()}
+# Following just for ProtoNet
+num_train_episode = 1000
+num_val_episode = 200
+frame_size = 10
+Ns_train = 5
+Nc_train = 5
+Nq_train = 5
+Ns_val = 5
+Nc_val = 5
+Nq_val = 5
 
-def calc_distances(x, y):
-    n = x.size(0)
-    m = y.size(0)
-    d = x.size(1)
+# Following just for finetuning
+batch_size = 32
 
-    x = x.unsqueeze(1).expand(n, m, d)
-    y = y.unsqueeze(0).expand(n, m, d)
-    return torch.pow(x - y, 2).sum(2)
+def train_step_proto(model, data, label, Ns, Nc, Nq, optimizer):
+    optimizer.zero_grad()
+    Qx, Qy = model(data, label, Ns, Nc, Nq, np.unique(label))
+    pred = torch.log_softmax(Qx, dim=-1)
+    loss = F.nll_loss(pred, Qy)
+    loss.backward()
+    optimizer.step()
+    acc = torch.mean((torch.argmax(pred, 1) == Qy).float())
+    return loss, acc
 
-def prepare_batch(batch, k, q):
-    data, label = batch
-    x = data.float().to(config.DEVICE)
-    y = torch.arange(0, k, 1 / q).long().to(config.DEVICE)
-    return x, y
-
-def predict(model, n, k, x, y=None):
-    embeddings = model(x)
-    supports, queries = embeddings[:n * k], embeddings[n * k:]
-    prototypes = supports.reshape(k, n, -1).mean(dim=1)
-    distances = calc_distances(queries, prototypes)
-    log_p_y = (-distances).log_softmax(dim=1)
-
-    if y is not None and model.loss is not None:
-        loss = model.loss(log_p_y, y)
-    else:
-        loss = None
-
-    y_pred = (-distances).softmax(dim=1)
-    return y_pred, loss
-
-def evaluate(model, history, dataloader, n, k, q, epoch_idx):
-    model.eval()
-
-    total_loss, total_acc, data_cnt = 0, 0, 0
+def val_step_proto(model, data, label, Ns, Nc, Nq):
     with torch.no_grad():
-        if config.MODEL == 'Finetuning':
-            for i, batch in enumerate(dataloader, 1):
-                x, y = batch
-                x = x.to(config.DEVICE)
-                y = y.to(config.DEVICE)
-                y_pred = model(x)
-                loss = model.loss(y_pred, y)
-                data_cnt += y_pred.shape[0]
-                total_loss += loss.item() * y_pred.shape[0]
-                total_acc += torch.eq(y_pred.argmax(dim=-1), y).sum().item()
+        Qx, Qy = model(data, label, Ns, Nc, Nq, np.unique(label))
+        pred = torch.log_softmax(Qx, dim=-1)
+        loss = F.nll_loss(pred, Qy)
+        acc = torch.mean((torch.argmax(pred, 1) == Qy).float())
+    return loss, acc
 
-        else:
-            for i, batch in enumerate(dataloader, 1):
-                x, y = prepare_batch(batch, k, q)
-                y_pred, loss = predict(model, n, k, x, y)
-                data_cnt += y_pred.shape[0]
-                total_loss += loss.item() * y_pred.shape[0]
-                total_acc += torch.eq(y_pred.argmax(dim=-1), y).sum().item()
-                
+def train_step_finetuning(model, data, label, optimizer):
+    optimizer.zero_grad()
+    pred = model(data)
+    loss = F.cross_entropy(pred, label)
+    loss.backward()
+    optimizer.step()
+    acc = torch.mean((torch.argmax(pred, 1) == label).float())
+    return loss, acc
 
-    history['loss'].append(total_loss / data_cnt)
-    history['accuracy'].append(total_acc / data_cnt)
-    print(f'{datetime.now()} [epoch {epoch_idx} eval] loss: {total_loss / data_cnt}, accuracy: {total_acc / data_cnt}')
+def val_step_finetuning(model, data, label):
+    with torch.no_grad():
+        pred = model(data)
+        loss = F.cross_entropy(pred, label)
+        acc = torch.mean((torch.argmax(pred, 1) == label).float())
+    return loss, acc
 
+def train_proto():
 
-def train_epoch(model, optimizer, scheduler, dataloader, n, k, q, epoch_idx):
-    model.train()
+    # Reading the data
+    dataset = DataSet('../training_seamed')
+    dataset.training_set['labels'] = dataset.training_set['labels'] - 1
+    dataset.val_set['labels'] = dataset.val_set['labels'] - 1
 
-    if config.MODEL == 'Finetuning':
-        for i, batch in enumerate(dataloader, 1):
-            optimizer.zero_grad()
-            x, y = batch
-            x = x.to(config.DEVICE)
-            y = y.to(config.DEVICE)
-            y_pred = model(x)
-            loss = model.loss(y_pred, y)
-            loss.backward()
-            optimizer.step()
-            print(f'{datetime.now()} [epoch {epoch_idx} batch {i}] loss: {loss.item()}')
-    else:
-        for i, batch in enumerate(dataloader, 1):
-            optimizer.zero_grad()
+    # Converting input to pytorch Tensor
+    train_data = torch.from_numpy(dataset.training_set['imgs']).float().to(config.DEVICE).permute(0, 3, 1, 2)
+    train_label = dataset.training_set['labels']
+    val_data = torch.from_numpy(dataset.val_set['imgs']).float().to(config.DEVICE).permute(0, 3, 1, 2)
+    val_label = dataset.val_set['labels']
 
-            x, y = prepare_batch(batch, k, q)
-            y_pred, loss = predict(model, n, k, x, y)
+    # Priniting the data and label size
+    print(train_data.size(), val_data.size())
 
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
+    # Initializing protonet
+    model = ProtoNet().to(config.DEVICE)
 
-            print(f'{datetime.now()} [epoch {epoch_idx} batch {i}] loss: {loss.item()}')
+    # Using Pretrained Model
+    # model.load_state_dict(torch.load(f'{config.MODEL_PATH}/protonets_0.ckpt'))
+
+    # Training loop
+    frame_loss = 0
+    frame_acc = 0
+
+    optimizer = Adam(model.parameters(), lr=lr)
+
+    for epoch in range(num_epoch):
+
+        for i in range(num_episode):
+            loss, acc = train_step_proto(model, train_data, train_label, Ns_train, Nc_train, Nq_train, optimizer)
+            frame_loss += loss.data
+            frame_acc += acc.data
+            if((i + 1) % frame_size == 0):
+                print("Frame Number:", ((i + 1) // frame_size), 'Frame Loss: ', frame_loss.data.cpu().numpy().tolist() /
+                      frame_size, 'Frame Accuracy:', (frame_acc.data.cpu().numpy().tolist() * 100) / frame_size)
+                frame_loss = 0
+                frame_acc = 0
+
+        # Save model
+        torch.save(model.state_dict(), f'{config.MODEL_PATH}/protonets_{epoch}.ckpt')
+
+        # Validation loop
+        avg_val_loss = 0
+        avg_val_acc = 0
+
+        for i in range(num_val_episode):
+            loss, acc = val_step_proto(model, val_data, val_label, Ns_val, Nc_val, Nq_val)
+            avg_val_loss += loss.data
+            avg_val_acc += acc.data
+
+        print('Avg Loss: ', avg_val_loss.data.cpu().numpy().tolist() / num_val_episode,
+              'Avg Accuracy:', (avg_val_acc.data.cpu().numpy().tolist() * 100) / num_val_episode)
+
+def train_finetunning():
+
+    # Reading the data
+    dataset = DataSet('../training_seamed', model="Finetuning")
+    dataset.training_set['labels'] = dataset.training_set['labels'] - 1
+    dataset.val_set['labels'] = dataset.val_set['labels'] - 1
+
+    # Converting input to pytorch Tensor
+    train_data = torch.from_numpy(dataset.training_set['raw_features']).float()
+    train_label = torch.from_numpy(dataset.training_set['labels']).long()
+    val_data = torch.from_numpy(dataset.val_set['raw_features']).float()
+    val_label = torch.from_numpy(dataset.val_set['labels']).long()
+
+    # Priniting the data and label size
+    print(train_data.size(), val_data.size())
+
+    # Initializing protonet
+    model = Finetuning().to(config.DEVICE)
+
+    # Using Pretrained Model
+    # model.load_state_dict(torch.load(f'{config.MODEL_PATH}/finetuning_1.ckpt'))
+
+    # Training loop
+    frame_loss = 0
+    frame_acc = 0
+
+    optimizer = Adam(model.parameters(), lr=lr)
+    train_set = CaltechDataset(train_data, train_label)
+    val_set = CaltechDataset(val_data, val_label)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(num_epoch):
+
+        j = 0
+        for i, data in enumerate(train_loader):
+            train_data, train_label = data
+            train_data = train_data.to(config.DEVICE)
+            train_label = train_label.to(config.DEVICE)
+
+            loss, acc = train_step_finetuning(model, train_data, train_label, optimizer)
+            print("Iter Number:", (j), 'Loss: ', (loss.data.cpu().numpy().tolist()), 'Accuracy:', (acc.data.cpu().numpy().tolist()))
+
+        # Save model
+        torch.save(model.state_dict(), f'{config.MODEL_PATH}/finetuning_{epoch}.ckpt')
+
+        # Validation loop
+        avg_val_loss = 0
+        avg_val_acc = 0
+
+        j = 0
+        for i, data in enumerate(val_loader):
+            val_data, val_label = data
+            val_data = val_data.to(config.DEVICE)
+            val_label = val_label.to(config.DEVICE)
+
+            loss, acc = val_step_finetuning(model, val_data, val_label)
+            avg_val_loss += loss.data
+            avg_val_acc += acc.data
+            j += 1
+
+        print('Avg Loss: ', avg_val_loss.data.cpu().numpy().tolist() / j,
+              'Avg Accuracy:', (avg_val_acc.data.cpu().numpy().tolist() * 100) / j)
 
 def main():
-
-    dataset = DataSet('../training_seamed', '../test_seamed', '../base')
-    dataset.training_set['labels'] = dataset.training_set['labels'] - 1 
-    dataset.test_set['labels'] = dataset.test_set['labels'] - 1
-    train_set = CaltechDataset('train', dataset.training_set)
-    if config.MODEL == 'Finetuning':
-        train_loader = DataLoader(train_set, num_workers=0, batch_size=32, shuffle=True)
-    else:
-        train_loader = DataLoader(train_set, num_workers=0, batch_sampler=FewShotBatchSampler(
-            train_set, episodes_per_epoch=episodes_per_epoch, n=n_train, k=k_train, q=q_train, num_tasks=num_tasks
-        ))
-
-    test_set = CaltechDataset('test', dataset.test_set)
-
-    if config.MODEL == 'Finetuning':
-        test_loader = DataLoader(test_set, num_workers=0, batch_size=32)
-    else:
-        test_loader = DataLoader(test_set, num_workers=0, batch_sampler=FewShotBatchSampler(
-            test_set, episodes_per_epoch=episodes_per_epoch, n=n_test, k=k_test, q=q_test, num_tasks=num_tasks
-        ))
-
-    model = model_dict[config.MODEL].to(config.DEVICE)
-
-    if config.MODEL == 'Finetuning':
-        optimizer = Adam(model.parameters(), lr=1e-5)
-        scheduler = None
-        history = {'loss': list(), 'accuracy': list()}
-    else:
-        optimizer = Adam(model.parameters(), lr=lr)
-        scheduler = StepLR(optimizer, step_size=lr_step_size, gamma=lr_gamma)
-        history = {'loss': list(), 'accuracy': list()}
-
-    for epoch in range(1, epochs + 1):
-        train_epoch(model, optimizer, scheduler, train_loader, n_train, k_train, q_train, epoch)
-        evaluate(model, history, test_loader, n_test, k_test, q_test, epoch)
-
-        # save model and history
-        if epoch == 1 or history['accuracy'][-1] > max(history['accuracy'][:-1]):
-            torch.save(model.state_dict(), f'{config.MODEL_PATH}/protonets.ckpt')
+    train_finetunning()
+    # train_proto()
 
 if __name__ == "__main__":
     main()
